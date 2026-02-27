@@ -1,0 +1,3 @@
+coverage/
+zig-out/
+.zig-cache/
