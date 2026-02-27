@@ -13,6 +13,7 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 
+/// Parsed components of a MongoDB connection URI.
 pub const MongoUri = struct {
     host: []const u8,
     port: u16,
@@ -130,11 +131,14 @@ fn randomBytes(buf: []u8) void {
     _ = linux.getrandom(buf.ptr, buf.len, 0);
 }
 
+/// Options controlling connection retry behavior.
 pub const ConnectOptions = struct {
     max_retries: u32 = 60,
     retry_delay_ms: u32 = 500,
+    backoff_ratio: u32 = 2,
 };
 
+/// A TCP connection to a MongoDB server with SCRAM-SHA-256 authentication.
 pub const Connection = struct {
     stream: net.Stream,
     io: Io,
@@ -143,13 +147,15 @@ pub const Connection = struct {
     next_request_id: i32 = 1,
     mutex: Mutex = .{},
 
-    /// Connect to MongoDB with retries.
-    pub fn connect(allocator: Allocator, uri: MongoUri, io: Io, options: ConnectOptions) !Connection {
+    /// Connect to MongoDB with retries and exponential backoff.
+    pub fn connect(allocator: Allocator, io: Io, uri: MongoUri, options: ConnectOptions) !Connection {
         var attempts: u32 = 0;
+        var delay_ms: u64 = options.retry_delay_ms;
         while (attempts < options.max_retries) : (attempts += 1) {
             const stream = tcpConnect(uri.host, uri.port, io) catch {
-                std.log.warn("MongoDB connection attempt {d}/{d} failed, retrying...", .{ attempts + 1, options.max_retries });
-                sleep(@as(u64, options.retry_delay_ms) * std.time.ns_per_ms);
+                std.log.warn("MongoDB connection attempt {d}/{d} failed, retrying in {d}ms...", .{ attempts + 1, options.max_retries, delay_ms });
+                sleep(delay_ms * std.time.ns_per_ms);
+                delay_ms *|= options.backoff_ratio;
                 continue;
             };
             var conn = Connection{
@@ -160,13 +166,15 @@ pub const Connection = struct {
             };
             conn.handshake() catch {
                 conn.stream.close(io);
-                sleep(@as(u64, options.retry_delay_ms) * std.time.ns_per_ms);
+                sleep(delay_ms * std.time.ns_per_ms);
+                delay_ms *|= options.backoff_ratio;
                 continue;
             };
             if (uri.username.len > 0) {
                 conn.authenticate() catch {
                     conn.stream.close(io);
-                    sleep(@as(u64, options.retry_delay_ms) * std.time.ns_per_ms);
+                    sleep(delay_ms * std.time.ns_per_ms);
+                    delay_ms *|= options.backoff_ratio;
                     continue;
                 };
             }
@@ -175,6 +183,7 @@ pub const Connection = struct {
         return error.ConnectionFailed;
     }
 
+    /// Close the underlying TCP connection.
     pub fn close(self: *Connection) void {
         self.stream.close(self.io);
     }
@@ -679,7 +688,7 @@ test "connect: fails with ConnectionFailed when server is down" {
     threaded.* = Io.Threaded.init(allocator, .{});
     const io = threaded.io();
     const uri = try parseUri("mongodb://127.0.0.1:19/testdb");
-    const result = Connection.connect(allocator, uri, io, .{ .max_retries = 1, .retry_delay_ms = 0 });
+    const result = Connection.connect(allocator, io, uri, .{ .max_retries = 1, .retry_delay_ms = 0 });
     try std.testing.expectError(error.ConnectionFailed, result);
 }
 

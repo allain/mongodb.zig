@@ -9,6 +9,7 @@ const connection_mod = @import("connection.zig");
 const Connection = connection_mod.Connection;
 const MongoUri = connection_mod.MongoUri;
 
+/// Options for `Client.find` queries.
 pub const FindOpts = struct {
     sort: ?ObjectMap = null,
     limit: i64 = 0,
@@ -17,11 +18,13 @@ pub const FindOpts = struct {
     batch_size: i64 = 0,
 };
 
+/// A MongoDB client that provides CRUD operations against a database.
 pub const Client = struct {
     conn: *Connection,
     database: []const u8,
     allocator: Allocator,
 
+    /// Create a new Client bound to the database specified in the connection URI.
     pub fn init(allocator: Allocator, conn: *Connection) Client {
         return .{
             .conn = conn,
@@ -361,7 +364,7 @@ fn connectForTest(allocator: Allocator) !TestContext {
     threaded.* = std.Io.Threaded.init(allocator, .{});
     const io = threaded.io();
     const conn = try allocator.create(Connection);
-    conn.* = try Connection.connect(allocator, uri, io, .{});
+    conn.* = try Connection.connect(allocator, io, uri, .{});
     const client = try allocator.create(Client);
     client.* = Client.init(allocator, conn);
     return .{ .conn = conn, .client = client, .threaded = threaded };

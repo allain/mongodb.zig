@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use-llvm", "Use Zig's LLVM backend (needed for kcov coverage)");
 
-    _ = b.addModule("mongo", .{
-        .root_source_file = b.path("src/mongo.zig"),
+    _ = b.addModule("mongodb", .{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // Unit tests
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/mongo.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     }
     const integ_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/mongo.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     }
     const cov_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/mongo.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -81,8 +81,9 @@ pub fn build(b: *std.Build) void {
         \\  sleep 1
         \\done
         \\echo "MongoDB ready"
-        \\rm -rf coverage
-        \\MONGO_URI="mongodb://testuser:testpass@localhost:27099/zig_mongo_test?authSource=admin" kcov --include-path=src coverage "$1"
+        \\COV_DIR="coverage/$(date +%Y%m%d-%H%M%S)"
+        \\MONGO_URI="mongodb://testuser:testpass@localhost:27099/zig_mongo_test?authSource=admin" kcov --include-path=src "$COV_DIR" "$1"
+        \\echo "Coverage report: $COV_DIR/index.html"
     , "_",
     });
     cov_run.addArtifactArg(cov_tests);
