@@ -242,34 +242,8 @@ pub const Client = struct {
 
         switch (cursor) {
             .object => |cursor_obj| {
-                // Get firstBatch
-                if (cursor_obj.get("firstBatch")) |batch| {
-                    switch (batch) {
-                        .array => |arr| {
-                            for (arr.items) |item| {
-                                switch (item) {
-                                    .object => |doc| {
-                                        const cloned = try cloneObjectMap(allocator, doc);
-                                        try results.append(allocator, cloned);
-                                    },
-                                    else => {},
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                }
-
-                // Check cursor ID for getMore
-                var cursor_id: i64 = 0;
-                if (cursor_obj.get("id")) |id_val| {
-                    switch (id_val) {
-                        .integer => cursor_id = id_val.integer,
-                        .float => cursor_id = @intFromFloat(id_val.float),
-                        else => {},
-                    }
-                }
-
+                try appendBatchDocs(allocator, &results, cursor_obj, "firstBatch");
+                var cursor_id = parseCursorId(cursor_obj);
                 bson.freeObjectMap(allocator, response);
 
                 // getMore loop
@@ -288,31 +262,8 @@ pub const Client = struct {
 
                     switch (gm_cursor) {
                         .object => |gm_cursor_obj| {
-                            if (gm_cursor_obj.get("nextBatch")) |batch| {
-                                switch (batch) {
-                                    .array => |arr| {
-                                        for (arr.items) |item| {
-                                            switch (item) {
-                                                .object => |doc| {
-                                                    const cloned = try cloneObjectMap(allocator, doc);
-                                                    try results.append(allocator, cloned);
-                                                },
-                                                else => {},
-                                            }
-                                        }
-                                    },
-                                    else => {},
-                                }
-                            }
-
-                            cursor_id = 0;
-                            if (gm_cursor_obj.get("id")) |id_val| {
-                                switch (id_val) {
-                                    .integer => cursor_id = id_val.integer,
-                                    .float => cursor_id = @intFromFloat(id_val.float),
-                                    else => {},
-                                }
-                            }
+                            try appendBatchDocs(allocator, &results, gm_cursor_obj, "nextBatch");
+                            cursor_id = parseCursorId(gm_cursor_obj);
                         },
                         else => cursor_id = 0,
                     }
@@ -328,6 +279,35 @@ pub const Client = struct {
         return results.toOwnedSlice(allocator);
     }
 };
+
+/// Append documents from a cursor batch (firstBatch or nextBatch) to results.
+fn appendBatchDocs(allocator: Allocator, results: *std.ArrayList(ObjectMap), cursor_obj: ObjectMap, batch_key: []const u8) !void {
+    const batch = cursor_obj.get(batch_key) orelse return;
+    switch (batch) {
+        .array => |arr| {
+            for (arr.items) |item| {
+                switch (item) {
+                    .object => |doc| {
+                        const cloned = try cloneObjectMap(allocator, doc);
+                        try results.append(allocator, cloned);
+                    },
+                    else => {},
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+/// Extract cursor ID from a cursor object. Returns 0 if not present or not numeric.
+fn parseCursorId(cursor_obj: ObjectMap) i64 {
+    const id_val = cursor_obj.get("id") orelse return 0;
+    return switch (id_val) {
+        .integer => id_val.integer,
+        .float => @intFromFloat(id_val.float),
+        else => 0,
+    };
+}
 
 /// Clone an ObjectMap, duping all keys and values.
 fn cloneObjectMap(allocator: Allocator, source: ObjectMap) !ObjectMap {
@@ -478,6 +458,46 @@ test "integration: find with sort/limit/skip" {
     // Sorted desc, skipped first (4) → expect 3, 2
     try testing.expectEqual(@as(i64, 3), results[0].get("seq").?.integer);
     try testing.expectEqual(@as(i64, 2), results[1].get("seq").?.integer);
+}
+
+test "integration: find with batch_size triggers getMore" {
+    const allocator = testing.allocator;
+    const ctx = connectForTest(allocator) catch |err| {
+        if (err == error.SkipTest) return;
+        return err;
+    };
+    defer cleanupTest(ctx, allocator);
+    try dropDatabase(ctx.client, allocator);
+
+    // Insert 5 documents
+    var docs_buf: [5]ObjectMap = undefined;
+    for (&docs_buf, 0..) |*d, i| {
+        d.* = ObjectMap.init(allocator);
+        d.put("seq", .{ .integer = @intCast(i) }) catch unreachable;
+    }
+    defer for (&docs_buf) |*d| d.deinit();
+    try ctx.client.insertMany(allocator, "batch_test", &docs_buf);
+
+    // Use batch_size=2 to force getMore with 5 docs
+    var empty_filter = ObjectMap.init(allocator);
+    defer empty_filter.deinit();
+    var sort = ObjectMap.init(allocator);
+    defer sort.deinit();
+    try sort.put("seq", .{ .integer = 1 });
+
+    const results = try ctx.client.find(allocator, "batch_test", empty_filter, .{
+        .sort = sort,
+        .batch_size = 2,
+    });
+    defer {
+        for (results) |*r| bson.freeObjectMap(allocator, @constCast(r));
+        allocator.free(results);
+    }
+
+    try testing.expectEqual(@as(usize, 5), results.len);
+    for (results, 0..) |r, i| {
+        try testing.expectEqual(@as(i64, @intCast(i)), r.get("seq").?.integer);
+    }
 }
 
 test "integration: replaceOne + verify" {
@@ -701,4 +721,231 @@ test "integration: createIndex" {
         }
     }
     try testing.expect(found_email_idx);
+}
+
+// ---------------------------------------------------------------------------
+// appendBatchDocs unit tests
+// ---------------------------------------------------------------------------
+
+test "appendBatchDocs: extracts documents from batch array" {
+    const allocator = testing.allocator;
+    var results: std.ArrayList(ObjectMap) = .empty;
+    defer {
+        for (results.items) |*d| bson.freeObjectMap(allocator, d);
+        results.deinit(allocator);
+    }
+
+    // Build a cursor object with firstBatch containing two docs
+    var doc1 = ObjectMap.init(allocator);
+    try doc1.put("x", .{ .integer = 1 });
+    var doc2 = ObjectMap.init(allocator);
+    try doc2.put("x", .{ .integer = 2 });
+
+    var batch = Array.init(allocator);
+    try batch.append(.{ .object = doc1 });
+    try batch.append(.{ .object = doc2 });
+    defer batch.deinit();
+    defer doc1.deinit();
+    defer doc2.deinit();
+
+    var cursor_obj = ObjectMap.init(allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("firstBatch", .{ .array = batch });
+
+    try appendBatchDocs(allocator, &results, cursor_obj, "firstBatch");
+
+    try testing.expectEqual(@as(usize, 2), results.items.len);
+    try testing.expectEqual(@as(i64, 1), results.items[0].get("x").?.integer);
+    try testing.expectEqual(@as(i64, 2), results.items[1].get("x").?.integer);
+}
+
+test "appendBatchDocs: returns empty for missing batch key" {
+    const allocator = testing.allocator;
+    var results: std.ArrayList(ObjectMap) = .empty;
+    defer results.deinit(allocator);
+
+    var cursor_obj = ObjectMap.init(allocator);
+    defer cursor_obj.deinit();
+
+    try appendBatchDocs(allocator, &results, cursor_obj, "firstBatch");
+    try testing.expectEqual(@as(usize, 0), results.items.len);
+}
+
+test "appendBatchDocs: skips non-object items in batch" {
+    const allocator = testing.allocator;
+    var results: std.ArrayList(ObjectMap) = .empty;
+    defer {
+        for (results.items) |*d| bson.freeObjectMap(allocator, d);
+        results.deinit(allocator);
+    }
+
+    var doc = ObjectMap.init(allocator);
+    try doc.put("x", .{ .integer = 1 });
+    defer doc.deinit();
+
+    var batch = Array.init(allocator);
+    try batch.append(.{ .integer = 999 });
+    try batch.append(.{ .object = doc });
+    try batch.append(.{ .string = "not a doc" });
+    defer batch.deinit();
+
+    var cursor_obj = ObjectMap.init(allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("nextBatch", .{ .array = batch });
+
+    try appendBatchDocs(allocator, &results, cursor_obj, "nextBatch");
+    try testing.expectEqual(@as(usize, 1), results.items.len);
+    try testing.expectEqual(@as(i64, 1), results.items[0].get("x").?.integer);
+}
+
+test "appendBatchDocs: handles non-array batch value" {
+    const allocator = testing.allocator;
+    var results: std.ArrayList(ObjectMap) = .empty;
+    defer results.deinit(allocator);
+
+    var cursor_obj = ObjectMap.init(allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("firstBatch", .{ .string = "not an array" });
+
+    try appendBatchDocs(allocator, &results, cursor_obj, "firstBatch");
+    try testing.expectEqual(@as(usize, 0), results.items.len);
+}
+
+// ---------------------------------------------------------------------------
+// parseCursorId unit tests
+// ---------------------------------------------------------------------------
+
+test "parseCursorId: returns integer id" {
+    var cursor_obj = ObjectMap.init(testing.allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("id", .{ .integer = 42 });
+    try testing.expectEqual(@as(i64, 42), parseCursorId(cursor_obj));
+}
+
+test "parseCursorId: returns float id as integer" {
+    var cursor_obj = ObjectMap.init(testing.allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("id", .{ .float = 100.0 });
+    try testing.expectEqual(@as(i64, 100), parseCursorId(cursor_obj));
+}
+
+test "parseCursorId: returns 0 for missing id" {
+    var cursor_obj = ObjectMap.init(testing.allocator);
+    defer cursor_obj.deinit();
+    try testing.expectEqual(@as(i64, 0), parseCursorId(cursor_obj));
+}
+
+test "parseCursorId: returns 0 for non-numeric id" {
+    var cursor_obj = ObjectMap.init(testing.allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("id", .{ .string = "not a number" });
+    try testing.expectEqual(@as(i64, 0), parseCursorId(cursor_obj));
+}
+
+test "parseCursorId: returns 0 for cursor id zero" {
+    var cursor_obj = ObjectMap.init(testing.allocator);
+    defer cursor_obj.deinit();
+    try cursor_obj.put("id", .{ .integer = 0 });
+    try testing.expectEqual(@as(i64, 0), parseCursorId(cursor_obj));
+}
+
+// ---------------------------------------------------------------------------
+// extractCursorDocs unit tests (no-getMore paths)
+// ---------------------------------------------------------------------------
+
+fn stubClient(allocator: Allocator) Client {
+    return .{
+        .conn = undefined,
+        .database = "test",
+        .allocator = allocator,
+    };
+}
+
+test "extractCursorDocs: returns empty slice when no cursor key" {
+    const allocator = testing.allocator;
+    var client = stubClient(allocator);
+
+    const ok_key = try allocator.dupe(u8, "ok");
+    var response = ObjectMap.init(allocator);
+    try response.put(ok_key, .{ .integer = 1 });
+
+    const docs = try client.extractCursorDocs(allocator, &response, "coll");
+    defer allocator.free(docs);
+
+    try testing.expectEqual(@as(usize, 0), docs.len);
+}
+
+test "extractCursorDocs: returns empty slice when cursor is not an object" {
+    const allocator = testing.allocator;
+    var client = stubClient(allocator);
+
+    const cursor_key = try allocator.dupe(u8, "cursor");
+    const bad_val = try allocator.dupe(u8, "bad");
+    var response = ObjectMap.init(allocator);
+    try response.put(cursor_key, .{ .string = bad_val });
+
+    const docs = try client.extractCursorDocs(allocator, &response, "coll");
+    defer allocator.free(docs);
+
+    try testing.expectEqual(@as(usize, 0), docs.len);
+}
+
+test "extractCursorDocs: extracts firstBatch docs with cursor id 0" {
+    const allocator = testing.allocator;
+    var client = stubClient(allocator);
+
+    // Build inner doc
+    var doc = ObjectMap.init(allocator);
+    const name_key = try allocator.dupe(u8, "name");
+    try doc.put(name_key, .{ .string = try allocator.dupe(u8, "alice") });
+
+    // Build batch array
+    var batch = Array.init(allocator);
+    try batch.append(.{ .object = doc });
+
+    // Build cursor object
+    var cursor_obj = ObjectMap.init(allocator);
+    const fb_key = try allocator.dupe(u8, "firstBatch");
+    try cursor_obj.put(fb_key, .{ .array = batch });
+    const id_key = try allocator.dupe(u8, "id");
+    try cursor_obj.put(id_key, .{ .integer = 0 });
+
+    // Build response
+    var response = ObjectMap.init(allocator);
+    const cursor_key = try allocator.dupe(u8, "cursor");
+    try response.put(cursor_key, .{ .object = cursor_obj });
+
+    var docs = try client.extractCursorDocs(allocator, &response, "coll");
+    defer {
+        for (docs) |*d| bson.freeObjectMap(allocator, d);
+        allocator.free(docs);
+    }
+
+    try testing.expectEqual(@as(usize, 1), docs.len);
+    try testing.expectEqualStrings("alice", docs[0].get("name").?.string);
+}
+
+test "extractCursorDocs: returns empty when firstBatch is empty" {
+    const allocator = testing.allocator;
+    var client = stubClient(allocator);
+
+    // Empty batch array
+    const batch = Array.init(allocator);
+
+    // Build cursor object
+    var cursor_obj = ObjectMap.init(allocator);
+    const fb_key = try allocator.dupe(u8, "firstBatch");
+    try cursor_obj.put(fb_key, .{ .array = batch });
+    const id_key = try allocator.dupe(u8, "id");
+    try cursor_obj.put(id_key, .{ .integer = 0 });
+
+    // Build response
+    var response = ObjectMap.init(allocator);
+    const cursor_key = try allocator.dupe(u8, "cursor");
+    try response.put(cursor_key, .{ .object = cursor_obj });
+
+    const docs = try client.extractCursorDocs(allocator, &response, "coll");
+    defer allocator.free(docs);
+
+    try testing.expectEqual(@as(usize, 0), docs.len);
 }
