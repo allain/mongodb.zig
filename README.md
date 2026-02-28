@@ -22,7 +22,7 @@ A native MongoDB client library for Zig. Connects over the MongoDB wire protocol
 Fetch the package:
 
 ```sh
-zig fetch --save git+https://codeberg.org/allain/zig-mongodb
+zig fetch --save git+https://codeberg.org/allain/mongodb.zig
 ```
 
 Then add it to your `build.zig`:
