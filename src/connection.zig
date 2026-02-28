@@ -7,8 +7,6 @@ const bson = @import("bson.zig");
 const wire = @import("wire.zig");
 const Io = std.Io;
 const net = Io.net;
-const linux = std.os.linux;
-
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -116,20 +114,6 @@ const Mutex = struct {
     }
 };
 
-fn sleep(ns: u64) void {
-    var req: linux.timespec = .{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    while (true) {
-        const rc = linux.nanosleep(&req, &req);
-        if (rc == 0) return;
-    }
-}
-
-fn randomBytes(buf: []u8) void {
-    _ = linux.getrandom(buf.ptr, buf.len, 0);
-}
 
 /// Options controlling connection retry behavior.
 pub const ConnectOptions = struct {
@@ -154,7 +138,7 @@ pub const Connection = struct {
         while (attempts < options.max_retries) : (attempts += 1) {
             const stream = tcpConnect(uri.host, uri.port, io) catch {
                 std.log.warn("MongoDB connection attempt {d}/{d} failed, retrying in {d}ms...", .{ attempts + 1, options.max_retries, delay_ms });
-                sleep(delay_ms * std.time.ns_per_ms);
+                io.sleep(Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                 delay_ms *|= options.backoff_ratio;
                 continue;
             };
@@ -166,14 +150,14 @@ pub const Connection = struct {
             };
             conn.handshake() catch {
                 conn.stream.close(io);
-                sleep(delay_ms * std.time.ns_per_ms);
+                io.sleep(Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                 delay_ms *|= options.backoff_ratio;
                 continue;
             };
             if (uri.username.len > 0) {
                 conn.authenticate() catch {
                     conn.stream.close(io);
-                    sleep(delay_ms * std.time.ns_per_ms);
+                    io.sleep(Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                     delay_ms *|= options.backoff_ratio;
                     continue;
                 };
@@ -316,7 +300,7 @@ fn scramSha256Auth(conn: *Connection) !void {
 
     // Generate client nonce
     var nonce_bytes: [24]u8 = undefined;
-    randomBytes(&nonce_bytes);
+    conn.io.random(&nonce_bytes);
     const client_nonce = std.base64.standard.Encoder.calcSize(nonce_bytes.len);
     var client_nonce_buf: [36]u8 = undefined; // base64 of 24 bytes = 32 chars, leave room
     const client_nonce_str = client_nonce_buf[0..client_nonce];
