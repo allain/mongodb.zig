@@ -99,20 +99,7 @@ pub fn parseUri(uri_str: []const u8) !MongoUri {
     };
 }
 
-/// Simple spinlock mutex for thread-safe command execution.
-const Mutex = struct {
-    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-
-    pub fn lock(self: *Mutex) void {
-        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        self.state.store(0, .release);
-    }
-};
+const Mutex = Io.Mutex;
 
 
 /// Options controlling connection retry behavior.
@@ -129,7 +116,7 @@ pub const Connection = struct {
     allocator: Allocator,
     uri: MongoUri,
     next_request_id: i32 = 1,
-    mutex: Mutex = .{},
+    mutex: Mutex = Mutex.init,
 
     /// Connect to MongoDB with retries and exponential backoff.
     pub fn connect(allocator: Allocator, io: Io, uri: MongoUri, options: ConnectOptions) !Connection {
@@ -174,8 +161,8 @@ pub const Connection = struct {
 
     /// Run a command against a database. Returns the response document.
     pub fn runCommand(self: *Connection, allocator: Allocator, db: []const u8, cmd: ObjectMap) !ObjectMap {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch return error.Canceled;
+        defer self.mutex.unlock(self.io);
 
         // Build command with $db field
         var cmd_with_db = ObjectMap.init(allocator);
@@ -230,8 +217,8 @@ pub const Connection = struct {
         seq_id: []const u8,
         doc_bsons: []const []const u8,
     ) !ObjectMap {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch return error.Canceled;
+        defer self.mutex.unlock(self.io);
 
         var cmd_with_db = ObjectMap.init(allocator);
 

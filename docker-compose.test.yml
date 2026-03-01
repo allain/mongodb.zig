@@ -1,0 +1,35 @@
+services:
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: testuser
+      MONGO_INITDB_ROOT_PASSWORD: testpass
+    healthcheck:
+      test: mongosh --quiet -u testuser -p testpass --eval "db.runCommand({ping:1})"
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  test-runner:
+    image: ubuntu:24.04
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://testuser:testpass@mongo:27017/zig_mongo_test?authSource=admin
+    working_dir: /workspace
+    entrypoint: []
+
+  coverage-runner:
+    image: kcov/kcov
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://testuser:testpass@mongo:27017/zig_mongo_test?authSource=admin
+    working_dir: /workspace
+    entrypoint: []
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined

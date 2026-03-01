@@ -52,14 +52,10 @@ pub fn build(b: *std.Build) void {
     integ_run.has_side_effects = true;
     integ_step.dependOn(&integ_run.step);
 
-    // Coverage via kcov (requires kcov, docker)
+    // Coverage via kcov (requires docker; kcov is installed inside the container)
     //   zig build coverage
     //   Report output: coverage/index.html
     const cov_step = b.step("coverage", "Run tests with kcov code coverage");
-    if (b.findProgram(&.{"kcov"}, &.{})) |_| {} else |_| {
-        cov_step.dependOn(&b.addFail("kcov is required for coverage. Install with: apt install kcov").step);
-        return;
-    }
     const cov_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
@@ -71,20 +67,7 @@ pub fn build(b: *std.Build) void {
         .use_lld = true,
     });
     const cov_run = b.addSystemCommand(&.{
-        "sh", "-c",
-        \\CONTAINER=$(docker run --rm -d -p 27099:27017 -e MONGO_INITDB_ROOT_USERNAME=testuser -e MONGO_INITDB_ROOT_PASSWORD=testpass mongo:7)
-        \\trap "docker stop $CONTAINER >/dev/null 2>&1" EXIT
-        \\echo "Waiting for MongoDB..."
-        \\for i in $(seq 1 30); do
-        \\  docker exec "$CONTAINER" mongosh --quiet -u testuser -p testpass --eval "db.runCommand({ping:1})" >/dev/null 2>&1 && break
-        \\  [ "$i" -eq 30 ] && echo "MongoDB failed to start" >&2 && exit 1
-        \\  sleep 1
-        \\done
-        \\echo "MongoDB ready"
-        \\COV_DIR="coverage/$(date +%Y%m%d-%H%M%S)"
-        \\MONGO_URI="mongodb://testuser:testpass@localhost:27099/zig_mongo_test?authSource=admin" kcov --include-path=src "$COV_DIR" "$1"
-        \\echo "Coverage report: $COV_DIR/index.html"
-    , "_",
+        b.path("coverage.sh").getPath(b),
     });
     cov_run.addArtifactArg(cov_tests);
     cov_run.has_side_effects = true;
