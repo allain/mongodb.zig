@@ -120,23 +120,13 @@ defer mongodb.bson.freeObjectMap(allocator, &decoded);
 
 ## Testing
 
-Run unit tests (no MongoDB required):
+Tests run against a real MongoDB instance via Docker Compose, with code coverage provided by kcov. No host port binding is needed — MongoDB is only reachable on an internal Docker network.
 
 ```sh
 zig build test
 ```
 
-Run integration tests (requires Docker):
-
-```sh
-zig build integration-test
-```
-
-Run tests with coverage (requires Docker and kcov):
-
-```sh
-zig build coverage
-```
+Requires Docker. Coverage report is written to `coverage/index.html`.
 
 ## License
 
